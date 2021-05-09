@@ -103,3 +103,41 @@ func TestHTTPHandlerCompression(t *testing.T) {
 	_, err = unStore.GetChunk(id)
 	require.NoError(t, err)
 }
+
+func TestHTTPHandlerEncryption(t *testing.T) {
+	// Prep a local store (no encryption)
+	store := t.TempDir()
+	upstream, err := NewLocalStore(store, StoreOptions{})
+	require.NoError(t, err)
+
+	// Start a read-write capable server with Encryption, no Compression
+	enc, err := NewXChaCha20Poly1305("testpassword")
+	require.NoError(t, err)
+	server := httptest.NewServer(NewHTTPHandler(upstream, true, false, []converter{enc}, ""))
+	defer server.Close()
+
+	// Initialize HTTP chunks store (client)
+	httpStoreURL, _ := url.Parse(server.URL)
+	httpStore, err := NewRemoteHTTPStore(httpStoreURL, StoreOptions{
+		Uncompressed:       true,
+		Encryption:         true,
+		EncryptionPassword: "testpassword",
+	})
+	require.NoError(t, err)
+
+	// Make up some data and store it in the RW store
+	dataIn := []byte("some data")
+	chunkIn := NewChunk(dataIn)
+	id := chunkIn.ID()
+
+	// Write a chunk via HTTP
+	err = httpStore.StoreChunk(chunkIn)
+	require.NoError(t, err)
+
+	// Read it back via HTTP and compare to the original
+	chunkOut, err := httpStore.GetChunk(id)
+	require.NoError(t, err)
+	dataOut, err := chunkOut.Data()
+	require.NoError(t, err)
+	require.Equal(t, dataIn, dataOut)
+}

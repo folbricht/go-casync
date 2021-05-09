@@ -1,6 +1,7 @@
 package desync
 
 import (
+	"bytes"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"net/url"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestHTTPStoreURL(t *testing.T) {
@@ -298,4 +301,41 @@ func TestPutChunk(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRemoteHTTPPutEncrypted(t *testing.T) {
+	body := new(bytes.Buffer)
+
+	// Setup a dummy server that records the request body (raw chunk data)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(body, r.Body)
+	}))
+	defer ts.Close()
+	u, _ := url.Parse(ts.URL)
+
+	// HTTP client store with encryption and compression
+	httpStore, err := NewRemoteHTTPStore(u, StoreOptions{
+		Uncompressed:       false,
+		Encryption:         true,
+		EncryptionPassword: "testpassword",
+	})
+	require.NoError(t, err)
+
+	// Prep a test chunk
+	dataIn := []byte("some data")
+	chunkIn := NewChunk(dataIn)
+
+	// Send the chunk over HTTP
+	err = httpStore.StoreChunk(chunkIn)
+	require.NoError(t, err)
+
+	// If everything worked, the request body should be the chunk data, first
+	// compressed, then encrypted. Unwind it manually to check the layers are in order.
+	dec, err := NewXChaCha20Poly1305("testpassword")
+	require.NoError(t, err)
+	decrypted, err := dec.fromStorage(body.Bytes())
+	require.NoError(t, err)
+	uncompressed, err := Decompress(nil, decrypted)
+	require.NoError(t, err)
+	require.Equal(t, dataIn, uncompressed)
 }

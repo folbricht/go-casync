@@ -53,9 +53,12 @@ func normalizeGCPrefix(path string) string {
 // NewGCStoreBase initializes a base object used for chunk or index stores
 // backed by Google Storage.
 func NewGCStoreBase(u *url.URL, opt StoreOptions) (GCStoreBase, error) {
-	var err error
 	ctx := context.TODO()
-	s := GCStoreBase{Location: u.String(), opt: opt, converters: opt.converters()}
+	converters, err := opt.StorageConverters()
+	if err != nil {
+		return GCStoreBase{}, err
+	}
+	s := GCStoreBase{Location: u.String(), opt: opt, converters: converters}
 	if u.Scheme != "gs" {
 		return s, fmt.Errorf("invalid scheme '%s', expected 'gs'", u.Scheme)
 	}
@@ -77,7 +80,7 @@ func (s GCStoreBase) String() string {
 	return s.Location
 }
 
-// Close the GCS base store. NOP opertation but needed to implement the store interface.
+// Close the GCS base store. NOP operation but needed to implement the store interface.
 func (s GCStoreBase) Close() error { return nil }
 
 // NewGCStore creates a chunk store with Google Storage backing. The URL
@@ -255,28 +258,16 @@ func (s GCStore) Prune(ctx context.Context, ids map[ChunkID]struct{}) error {
 
 func (s GCStore) nameFromID(id ChunkID) string {
 	sID := id.String()
-	name := s.prefix + sID[0:4] + "/" + sID
-	if s.opt.Uncompressed {
-		name += UncompressedChunkExt
-	} else {
-		name += CompressedChunkExt
-	}
+	name := s.prefix + sID[0:4] + "/" + sID + s.converters.storageExtension()
 	return name
 }
 
 func (s GCStore) idFromName(name string) (ChunkID, error) {
-	var n string
-	if s.opt.Uncompressed {
-		if !strings.HasSuffix(name, UncompressedChunkExt) {
-			return ChunkID{}, fmt.Errorf("object %s is not a chunk", name)
-		}
-		n = strings.TrimSuffix(strings.TrimPrefix(name, s.prefix), UncompressedChunkExt)
-	} else {
-		if !strings.HasSuffix(name, CompressedChunkExt) {
-			return ChunkID{}, fmt.Errorf("object %s is not a chunk", name)
-		}
-		n = strings.TrimSuffix(strings.TrimPrefix(name, s.prefix), CompressedChunkExt)
+	extension := s.converters.storageExtension()
+	if !strings.HasSuffix(name, extension) {
+		return ChunkID{}, fmt.Errorf("object %s is not a chunk", name)
 	}
+	n := strings.TrimSuffix(strings.TrimPrefix(name, s.prefix), extension)
 	fragments := strings.Split(n, "/")
 	if len(fragments) != 2 {
 		return ChunkID{}, fmt.Errorf("incorrect chunk name for object %s", name)

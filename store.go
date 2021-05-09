@@ -2,6 +2,7 @@ package desync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -86,17 +87,44 @@ type StoreOptions struct {
 
 	// Store and read chunks uncompressed, without chunk file extension
 	Uncompressed bool `json:"uncompressed"`
+
+	// Store encryption settings. Currently supported algorithms are xchacha20-poly1305 (default)
+	// and aes-256-gcm.
+	Encryption          bool   `json:"encryption,omitempty"`
+	EncryptionAlgorithm string `json:"encryption-algorithm,omitempty"`
+	EncryptionPassword  string `json:"encryption-password,omitempty"`
 }
 
-// Returns data converters that convert between plain and storage-format. Each layer
+// Returns data StorageConverters that convert between plain and storage-format. Each layer
 // represents a modification such as compression or encryption and is applied in order
 // depending the direction of data. If data is written to storage, the layer's toStorage
-// method is called in the order they are returned. If data is read, the fromStorage
+// method is called in the order they are defined. If data is read, the fromStorage
 // method is called in reverse order.
-func (o StoreOptions) converters() []converter {
-	var m []converter
+func (o StoreOptions) StorageConverters() ([]converter, error) {
+	var c []converter
 	if !o.Uncompressed {
-		m = append(m, Compressor{})
+		c = append(c, Compressor{})
 	}
-	return m
+	if o.Encryption {
+		if o.EncryptionPassword == "" {
+			return nil, errors.New("no encryption password configured")
+		}
+		switch o.EncryptionAlgorithm {
+		case "", "xchacha20-poly1305":
+			enc, err := NewXChaCha20Poly1305(o.EncryptionPassword)
+			if err != nil {
+				return nil, err
+			}
+			c = append(c, enc)
+		case "aes-256-gcm":
+			enc, err := NewAES256GCM(o.EncryptionPassword)
+			if err != nil {
+				return nil, err
+			}
+			c = append(c, enc)
+		default:
+			return nil, fmt.Errorf("unsupported encryption algorithm %q", o.EncryptionAlgorithm)
+		}
+	}
+	return c, nil
 }

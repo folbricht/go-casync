@@ -32,8 +32,11 @@ type S3Store struct {
 
 // NewS3StoreBase initializes a base object used for chunk or index stores backed by S3.
 func NewS3StoreBase(u *url.URL, s3Creds *credentials.Credentials, region string, opt StoreOptions, lookupType minio.BucketLookupType) (S3StoreBase, error) {
-	var err error
-	s := S3StoreBase{Location: u.String(), opt: opt, converters: opt.converters()}
+	converters, err := opt.StorageConverters()
+	if err != nil {
+		return S3StoreBase{}, err
+	}
+	s := S3StoreBase{Location: u.String(), opt: opt, converters: converters}
 	if !strings.HasPrefix(u.Scheme, "s3+http") {
 		return s, fmt.Errorf("invalid scheme '%s', expected 's3+http' or 's3+https'", u.Scheme)
 	}
@@ -189,28 +192,16 @@ func (s S3Store) Prune(ctx context.Context, ids map[ChunkID]struct{}) error {
 
 func (s S3Store) nameFromID(id ChunkID) string {
 	sID := id.String()
-	name := s.prefix + sID[0:4] + "/" + sID
-	if s.opt.Uncompressed {
-		name += UncompressedChunkExt
-	} else {
-		name += CompressedChunkExt
-	}
+	name := s.prefix + sID[0:4] + "/" + sID + s.converters.storageExtension()
 	return name
 }
 
 func (s S3Store) idFromName(name string) (ChunkID, error) {
-	var n string
-	if s.opt.Uncompressed {
-		if !strings.HasSuffix(name, UncompressedChunkExt) {
-			return ChunkID{}, fmt.Errorf("object %s is not a chunk", name)
-		}
-		n = strings.TrimSuffix(strings.TrimPrefix(name, s.prefix), UncompressedChunkExt)
-	} else {
-		if !strings.HasSuffix(name, CompressedChunkExt) {
-			return ChunkID{}, fmt.Errorf("object %s is not a chunk", name)
-		}
-		n = strings.TrimSuffix(strings.TrimPrefix(name, s.prefix), CompressedChunkExt)
+	extension := s.converters.storageExtension()
+	if !strings.HasSuffix(name, extension) {
+		return ChunkID{}, fmt.Errorf("object %s is not a chunk", name)
 	}
+	n := strings.TrimSuffix(strings.TrimPrefix(name, s.prefix), extension)
 	fragments := strings.Split(n, "/")
 	if len(fragments) != 2 {
 		return ChunkID{}, fmt.Errorf("incorrect chunk name for object %s", name)

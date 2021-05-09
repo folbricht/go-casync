@@ -27,6 +27,7 @@ Among the distinguishing factors:
 - Built-in HTTP(S) index server to read/write indexes
 - Reflinking matching blocks (rather than copying) from seed files if supported by the filesystem (currently only Btrfs and XFS)
 - catar archives can be created from standard tar archives, and they can also be extracted to GNU tar format.
+- Optional chunk store encryption with XChaCha20-Poly1305 or AES-265-GCM.
 
 ## Terminology
 
@@ -69,7 +70,7 @@ catar archives can also be extracted to GNU tar archive streams. All files in th
 
 ## Tool
 
-The tool is provided for convenience. It uses the desync library and makes most features of it available in a consistent fashion. It does not match upsteam casync's syntax exactly, but tries to be similar at least.
+The tool is provided for convenience. It uses the desync library and makes most features of it available in a consistent fashion. It does not match upstream casync's syntax exactly, but tries to be similar at least.
 
 ### Installation
 
@@ -233,6 +234,25 @@ If the client configures the HTTP chunk server to be uncompressed (`chunk-server
 
 Compressed and uncompressed chunks can live in the same store and don't interfere with each other. A store that's configured for compressed chunks by configuring it client-side will not see the uncompressed chunks that may be present. `prune` and `verify` too will ignore any chunks written in the other format. Both kinds of chunks can be accessed by multiple clients concurrently and independently.
 
+### Chunk Encryption
+
+Chunks can be encrypted with a symmetric algorithm on a per-store basis. To use encryption, it has to be enabled in the [configuration](Configuration) file, and an algorithm needs to be specified. A single instance of desync can use multiple stores at the same time, each with a different (or the same) encryption mode and key. Encrypted chunks are stores with file extensions containing the algorithm and a key identifier. If the password for a store is changed, all existing chunks in it will become "invisible" since the extension would no longer match. To change the key, chunks have to be re-encrypted with the new key. That could happen into same, or better, a new store. Create a new store, then either re-chunk the data, or use `desync cache -c <new-store> -s <old-store> <index>` to decrypt the chunks from the old store and re-encrypt with the new key in the new store.
+For all available algorithms, the 256bit encryption key is derived from the configured password by hashing it with SHA256. Encryption nonces or IVs are generated randomly per chunk which can weaken encryption in some modes when used on very large chunk stores, see notes below.
+
+| ID | Algorithm | Key | Nonce/IV | Notes |
+|:---:|:---:|:---:|:---:|:---:|
+| `xchacha20-poly1305` | XChaCha20-Poly1305 (AEAD) | 256bit | 192bit | Default |
+| `aes-256-gcm` | AES 256bit Galois Counter Mode (AEAD) | 256bit | 128bit | Don't use for large chunk stores (>2<sup>32</sup> chunks) |
+
+Chunk extensions in stores are chosen based on compression or encryption settings as follows:
+
+| Compressed | Encrypted | Extension | Example |
+|:---:|:---:|:---:|:---:|
+| no | no | n/a | `fbef/fbef1a00ced..9280ce78` |
+| yes | no | `.cacnk` | `ffbef/fbef1a00ced..9280ce78.cacnk` |
+| no | yes | `.<algorithm>-<keyID>` | `fbef/fbef1a00ced..9280ce78.aes-256-gcm-635af003` |
+| yes | yes | `.cacnk.<algorithm>-<keyID>` | `fbef/fbef1a00ced..9280ce78.cacnk.aes-256-gcm-635af003` |
+
 ### Configuration
 
 For most use cases, it is sufficient to use the tool's default configuration not requiring a config file. Having a config file `$HOME/.config/desync/config.json` allows for further customization of timeouts, error retry behaviour or credentials that can't be set via command-line options or environment variables. All values have sensible defaults if unconfigured. Only add configuration for values that differ from the defaults. To view the current configuration, use `desync config`. If no config file is present, this will show the defaults. To create a config file allowing custom values, use `desync config -w` which will write the current configuration to the file, then edit the file.
@@ -242,17 +262,20 @@ Available configuration values:
 - `http-timeout` *DEPRECATED, see `store-options.<Location>.timeout`* - HTTP request timeout used in HTTP stores (not S3) in nanoseconds
 - `http-error-retry` *DEPRECATED, see `store-options.<Location>.error-retry` - Number of times to retry failed chunk requests from HTTP stores
 - `s3-credentials` - Defines credentials for use with S3 stores. Especially useful if more than one S3 store is used. The key in the config needs to be the URL scheme and host used for the store, excluding the path, but including the port number if used in the store URL. It is also possible to use a [standard aws credentials file](https://docs.aws.amazon.com/cli/latest/userguide/cli-config-files.html) in order to store s3 credentials.
-- `store-options` - Allows customization of chunk and index stores, for example comression settings, timeouts, retry behavior and keys. Not all options are applicable to every store, some of these like `timeout` are ignored for local stores. Some of these options, such as the client certificates are overwritten with any values set in the command line. Note that the store location used in the command line needs to match the key under `store-options` exactly for these options to be used. Watch out for trailing `/` in URLs.
+- `store-options` - Allows customization of chunk and index stores, for example compression settings, timeouts, retry behavior and keys. Not all options are applicable to every store, some of these like `timeout` are ignored for local stores. Some of these options, such as the client certificates are overwritten with any values set in the command line. Note that the store location used in the command line needs to match the key under `store-options` exactly for these options to be used. Watch out for trailing `/` in URLs.
   - `timeout` - Time limit for chunk read or write operation in nanoseconds. Default: 1 minute. If set to a negative value, timeout is infinite.
   - `error-retry` - Number of times to retry failed chunk requests. Default: 0.
   - `error-retry-base-interval` - Number of nanoseconds to wait before first retry attempt. Retry attempt number N for the same request will wait N times this interval. Default: 0.
-  - `client-cert` - Cerificate file to be used for stores where the server requires mutual SSL.
+  - `client-cert` - Certificate file to be used for stores where the server requires mutual SSL.
   - `client-key` - Key file to be used for stores where the server requires mutual SSL.
   - `ca-cert` - Certificate file containing trusted certs or CAs.
   - `trust-insecure` - Trust any certificate presented by the server.
   - `skip-verify` - Disables data integrity verification when reading chunks to improve performance. Only recommended when chaining chunk stores with the `chunk-server` command using compressed stores.
   - `uncompressed` - Reads and writes uncompressed chunks from/to this store. This can improve performance, especially for local stores or caches. Compressed and uncompressed chunks can coexist in the same store, but only one kind is read or written by one client.
   - `http-auth` - Value of the Authorization header in HTTP requests. This could be a bearer token with `"Bearer <token>"` or a Base64-encoded username and password pair for basic authentication like `"Basic dXNlcjpwYXNzd29yZAo="`.
+  - `encryption` - Must be set to `true` to encrypt chunks in the store.
+  - `encryption-password` - Encryption password to use for all chunks in the store.
+  - `encryption-algorithm` - Optional, symmetric encryption algorithm. Default `xchacha20-poly1305`.
 
 #### Example config
 
@@ -287,6 +310,11 @@ Available configuration values:
     },
     "/path/to/local/cache": {
       "uncompressed": true
+    },
+    "/path/to/encrypted/store": {
+      "encryption": true,
+      "encryption-algorithm": "xchacha20-poly1305",
+      "encryption-password": "mystorepassword"
     }
   }
 }

@@ -21,3 +21,26 @@ func Compress(src []byte) ([]byte, error) {
 func Decompress(dst, src []byte) ([]byte, error) {
 	return decoder.DecodeAll(src, dst)
 }
+
+// Compression layer converter. Compresses/decompresses chunk data
+// to and from storage. Implements the converter interface.
+type Compressor struct{}
+
+var _ converter = Compressor{}
+
+func (d Compressor) toStorage(in []byte) ([]byte, error) {
+	return Compress(in)
+}
+
+func (d Compressor) fromStorage(in []byte) ([]byte, error) {
+	return Decompress(nil, in)
+}
+
+func (d Compressor) equal(c converter) bool {
+	_, ok := c.(Compressor)
+	return ok
+}
+
+func (d Compressor) storageExtension() string {
+	return ".cacnk"
+}

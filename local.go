@@ -42,7 +42,11 @@ func NewLocalStore(dir string, opt StoreOptions) (LocalStore, error) {
 	if !info.IsDir() {
 		return LocalStore{}, fmt.Errorf("%s is not a directory", dir)
 	}
-	return LocalStore{Base: dir, opt: opt, converters: opt.converters()}, nil
+	converters, err := opt.StorageConverters()
+	if err != nil {
+		return LocalStore{}, err
+	}
+	return LocalStore{Base: dir, opt: opt, converters: converters}, nil
 }
 
 // GetChunk reads and returns one (compressed!) chunk from the store
@@ -127,6 +131,7 @@ func (s LocalStore) Verify(ctx context.Context, n int, repair bool, w io.Writer)
 
 	// Go trough all chunks underneath Base, filtering out other files, then feed
 	// the IDs to the workers
+	extension := s.converters.storageExtension()
 	err := filepath.Walk(s.Base, func(path string, info os.FileInfo, err error) error {
 		// See if we're meant to stop
 		select {
@@ -141,18 +146,10 @@ func (s LocalStore) Verify(ctx context.Context, n int, repair bool, w io.Writer)
 			return nil
 		}
 		// Skip compressed chunks if this is running in uncompressed mode and vice-versa
-		var sID string
-		if s.opt.Uncompressed {
-			if !strings.HasSuffix(path, UncompressedChunkExt) {
-				return nil
-			}
-			sID = strings.TrimSuffix(filepath.Base(path), UncompressedChunkExt)
-		} else {
-			if !strings.HasSuffix(path, CompressedChunkExt) {
-				return nil
-			}
-			sID = strings.TrimSuffix(filepath.Base(path), CompressedChunkExt)
+		if !strings.HasSuffix(filepath.Base(path), extension) {
+			return nil
 		}
+		sID := strings.TrimSuffix(filepath.Base(path), extension)
 		// Convert the name into a checksum, if that fails we're probably not looking
 		// at a chunk file and should skip it.
 		id, err := ChunkIDFromString(sID)
@@ -171,6 +168,7 @@ func (s LocalStore) Verify(ctx context.Context, n int, repair bool, w io.Writer)
 // Prune removes any chunks from the store that are not contained in a list
 // of chunks
 func (s LocalStore) Prune(ctx context.Context, ids map[ChunkID]struct{}) error {
+	extension := s.converters.storageExtension()
 	// Go trough all chunks underneath Base, filtering out other directories and files
 	err := filepath.Walk(s.Base, func(path string, info os.FileInfo, err error) error {
 		// See if we're meant to stop
@@ -191,20 +189,11 @@ func (s LocalStore) Prune(ctx context.Context, ids map[ChunkID]struct{}) error {
 			_ = os.Remove(path)
 			return nil
 		}
-
 		// Skip compressed chunks if this is running in uncompressed mode and vice-versa
-		var sID string
-		if s.opt.Uncompressed {
-			if !strings.HasSuffix(path, UncompressedChunkExt) {
-				return nil
-			}
-			sID = strings.TrimSuffix(filepath.Base(path), UncompressedChunkExt)
-		} else {
-			if !strings.HasSuffix(path, CompressedChunkExt) {
-				return nil
-			}
-			sID = strings.TrimSuffix(filepath.Base(path), CompressedChunkExt)
+		if !strings.HasSuffix(filepath.Base(path), extension) {
+			return nil
 		}
+		sID := strings.TrimSuffix(filepath.Base(path), extension)
 		// Convert the name into a checksum, if that fails we're probably not looking
 		// at a chunk file and should skip it.
 		id, err := ChunkIDFromString(sID)
@@ -246,11 +235,6 @@ func (s LocalStore) Close() error { return nil }
 func (s LocalStore) nameFromID(id ChunkID) (dir, name string) {
 	sID := id.String()
 	dir = filepath.Join(s.Base, sID[0:4])
-	name = filepath.Join(dir, sID)
-	if s.opt.Uncompressed {
-		name += UncompressedChunkExt
-	} else {
-		name += CompressedChunkExt
-	}
+	name = filepath.Join(dir, sID) + s.converters.storageExtension()
 	return
 }

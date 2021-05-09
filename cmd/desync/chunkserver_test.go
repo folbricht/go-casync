@@ -181,3 +181,43 @@ func startChunkServer(t *testing.T, args ...string) (string, context.CancelFunc)
 	time.Sleep(time.Second)
 	return addr, cancel
 }
+
+func TestChunkServerEncryption(t *testing.T) {
+	outdir := t.TempDir()
+
+	// Start a (writable) server, it'll expect compressed+encrypted chunks over
+	// the wire while storing them only compressed in the local store
+	addr, cancel := startChunkServer(t, "-s", outdir, "-w", "--skip-verify-read=false", "--skip-verify-write=false", "--encryption-password", "testpassword")
+	defer cancel()
+	store := fmt.Sprintf("http://%s/", addr)
+
+	// Build a client config. The client needs to be setup to talk to the HTTP chunk server
+	// compressed+encrypted. Create a temp JSON config for that HTTP store and load it.
+	cfgFile = filepath.Join(outdir, "config.json")
+	cfgFileContent := fmt.Sprintf(`{"store-options": {"%s":{"encryption": true, "encryption-password": "testpassword"}}}`, store)
+	require.NoError(t, ioutil.WriteFile(cfgFile, []byte(cfgFileContent), 0644))
+	initConfig()
+
+	// Run a "chop" command to send some chunks (encrypted) over HTTP, then have the server
+	// store them un-encrypted in its local store.
+	chopCmd := newChopCommand(context.Background())
+	chopCmd.SetArgs([]string{"-s", store, "testdata/blob1.caibx", "testdata/blob1"})
+	chopCmd.SetOutput(ioutil.Discard)
+	_, err := chopCmd.ExecuteC()
+	require.NoError(t, err)
+
+	// Now read it all back over HTTP (again encrypted) and re-assemble the test file
+	extractFile := filepath.Join(outdir, "blob1")
+	extractCmd := newExtractCommand(context.Background())
+	extractCmd.SetArgs([]string{"-s", store, "testdata/blob1.caibx", extractFile})
+	extractCmd.SetOutput(ioutil.Discard)
+	_, err = extractCmd.ExecuteC()
+	require.NoError(t, err)
+
+	// Not actually necessary, but for good measure let's compare the blobs
+	blobIn, err := ioutil.ReadFile("testdata/blob1")
+	require.NoError(t, err)
+	blobOut, err := ioutil.ReadFile(extractFile)
+	require.NoError(t, err)
+	require.Equal(t, blobIn, blobOut)
+}

@@ -89,7 +89,11 @@ func NewRemoteHTTPStoreBase(location *url.URL, opt StoreOptions) (*RemoteHTTPBas
 	}
 	client := &http.Client{Transport: tr, Timeout: timeout}
 
-	return &RemoteHTTPBase{location: location, client: client, opt: opt, converters: opt.converters()}, nil
+	converters, err := opt.StorageConverters()
+	if err != nil {
+		return nil, err
+	}
+	return &RemoteHTTPBase{location: location, client: client, opt: opt, converters: converters}, nil
 }
 
 func (r *RemoteHTTPBase) String() string {
@@ -153,11 +157,10 @@ func (r *RemoteHTTPBase) IssueRetryableHttpRequest(method string, u *url.URL, ge
 retry:
 	attempt++
 	statusCode, responseBody, err := r.IssueHttpRequest(method, u, getReader, attempt)
-
 	if (err != nil) || (statusCode >= 500 && statusCode < 600) {
 		if attempt >= r.opt.ErrorRetry {
 			log.WithField("attempt", attempt).Debug("failed, giving up")
-			return 0, nil, err
+			return statusCode, responseBody, err
 		} else {
 			log.WithField("attempt", attempt).WithField("delay", attempt).Debug("waiting, then retrying")
 			time.Sleep(time.Duration(attempt) * r.opt.ErrorRetryBaseInterval)
@@ -253,11 +256,6 @@ func (r *RemoteHTTP) StoreChunk(chunk *Chunk) error {
 
 func (r *RemoteHTTP) nameFromID(id ChunkID) string {
 	sID := id.String()
-	name := path.Join(sID[0:4], sID)
-	if r.opt.Uncompressed {
-		name += UncompressedChunkExt
-	} else {
-		name += CompressedChunkExt
-	}
+	name := path.Join(sID[0:4], sID) + r.converters.storageExtension()
 	return name
 }
